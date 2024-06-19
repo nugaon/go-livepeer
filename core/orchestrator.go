@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -609,7 +610,8 @@ func (n *LivepeerNode) transcodeSeg(ctx context.Context, config transcodeConfig,
 	// Prepare the result object
 	var tr TranscodeResult
 	segHashes := make([][]byte, len(tSegments))
-
+	beeClient := common.NewBeeClient("http://localhost:1633", "1ac288fecf440dddb8e23bbdfeb6578df056993cf0708129ce4fa3b293e0e6b6")
+	socTopic := crypto.Keccak256Hash([]byte(md.ManifestID)).Bytes()
 	for i := range md.Profiles {
 		if tSegments[i].Data == nil || len(tSegments[i].Data) < 25 {
 			clog.Errorf(ctx, "Cannot find transcoded segment for bytes=%d", len(tSegments[i].Data))
@@ -624,6 +626,37 @@ func (n *LivepeerNode) transcodeSeg(ctx context.Context, config transcodeConfig,
 			md.Profiles[i].Name, len(tSegments[i].Data))
 		hash := crypto.Keccak256(tSegments[i].Data)
 		segHashes[i] = hash
+
+		clog.V(common.DEBUG).Infof(ctx, "HELLOOOOO")
+		// push data to Bee
+		swarmRef, err := beeClient.UploadBytes(tSegments[i].Data)
+		if err != nil {
+			clog.Errorf(ctx, "could not push segment to Bee: %w", err)
+		}
+		clog.V(common.DEBUG).Infof(ctx, "HELLOOOOO2 %x", swarmRef)
+		// sign soc
+		socSig, err := n.Eth.Sign(swarmRef)
+		if err != nil {
+			clog.Errorf(ctx, "Unable to sign hash of transcoded segment hashes err=%q", tr.Err)
+		}
+		indexBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(indexBytes, uint64(md.Seq))
+		cacPayload := tSegments[i].Data
+		spanValue := uint64(len(cacPayload))
+		span := make([]byte, 8)
+		binary.LittleEndian.PutUint64(span, spanValue)
+		identifier := crypto.Keccak256(socTopic, indexBytes)
+		socPayload := []byte{}
+		socPayload = append(socPayload, identifier...)
+		socPayload = append(socPayload, socSig...)
+		socPayload = append(socPayload, span...)
+		socPayload = append(socPayload, cacPayload...)
+		clog.V(common.DEBUG).Infof(ctx, "HELLOOOO3")
+
+		_, err = beeClient.UploadSoc(socPayload)
+		if err != nil {
+			clog.Errorf(ctx, "Unable to upload SOC payload err=%w", err)
+		}
 	}
 	os.Remove(fname)
 	tr.OS = config.OS
